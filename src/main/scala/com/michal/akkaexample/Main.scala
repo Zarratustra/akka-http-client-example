@@ -22,7 +22,8 @@ import scala.concurrent.{Await, Future}
 // to a directory passed as command-line parameter
 object Main extends App with PostJsonSupport {
 
-  val uri = "https://jsonplaceholder.typicode.com/posts"
+  val postsUri = "https://jsonplaceholder.typicode.com/posts"
+  def commentsOfPostUri(postId: Long) = "https://jsonplaceholder.typicode.com/posts/"+postId+"/comments"
   val parallelism = 4
 
   implicit val jsonStreamingSupport: JsonEntityStreamingSupport =
@@ -32,7 +33,6 @@ object Main extends App with PostJsonSupport {
   args.headOption match {
     case Some(targetDirectoryPath) if isDirectory(targetDirectoryPath) =>
       readPosts(targetDirectoryPath)
-      println("posts saved successfully")
     case Some(targetDirectoryPath)  =>
       println("No posts read - invalid target directory path passed")
     case None =>
@@ -56,7 +56,13 @@ object Main extends App with PostJsonSupport {
       Await.result(system.terminate(), Duration.Inf)
     }
 
-    val responseFuture = Http().singleRequest(HttpRequest(uri = uri))
+    def fetchComments(postId:Long): Future[List[Comment]] = {
+      Http()
+        .singleRequest(HttpRequest(uri = commentsOfPostUri(postId)))
+        .flatMap(res => Unmarshal(res).to[List[Comment]])
+    }
+
+    val responseFuture = Http().singleRequest(HttpRequest(uri = postsUri))
 
     val futureSource = responseFuture
       .flatMap { response =>
@@ -66,12 +72,19 @@ object Main extends App with PostJsonSupport {
     Source
       .fromFutureSource(futureSource)
       .mapAsync(parallelism) { post =>
-        saveSinglePost(post, targetDirectory)
-      }.runWith(Sink.ignore)
-      .onComplete { _ =>shutDownActorSystem()}
+        fetchComments(post.id).map{ comments =>
+          post.withComments(comments)
+        }
+      }.mapAsync(parallelism){ post =>
+      saveSinglePost(post, targetDirectory)
+    }.runWith(Sink.ignore)
+      .onComplete { _ =>
+        println("Posts saved successfully")
+        shutDownActorSystem()
+      }
   }
 
-  def saveSinglePost(post: Post, targetDirectory: String)(implicit m: Materializer): Future[IOResult] = {
+  def saveSinglePost(post: PostWithComments, targetDirectory: String)(implicit m: Materializer): Future[IOResult] = {
     val fileName = targetDirectory + File.separator + post.id +  ".json"
     Source.single(ByteString(post.toJson.prettyPrint)).runWith(FileIO.toPath(Paths.get(fileName)))
   }
